@@ -7,6 +7,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 from app.config import CHUNK_SIZE
+from app.services.chunking import chunk_index_for_row, chunk_row_bounds, empty_sheet_chunk_count
 from app.models import ExcelDocument, ExcelSheet, ExcelSheetChunk
 
 logger = logging.getLogger(__name__)
@@ -174,9 +175,8 @@ def save_sheet_meta(sheet_val, doc_id: int, sheet_index: int, db: Session) -> Ex
 def save_sheet_chunks(sheet_val, sheet_form, sheet_entity: ExcelSheet, db: Session):
     last_row_idx = sheet_val.max_row - 1
     buffer = []
-    chunk_index = 0
+    chunk_count = 0
     chunk_start_row = 0
-    chunk_end_row = 0
 
     for row_idx in range(last_row_idx + 1):
         # openpyxl indices are 1-based
@@ -196,33 +196,34 @@ def save_sheet_chunks(sheet_val, sheet_form, sheet_entity: ExcelSheet, db: Sessi
                 }
                 buffer.append(cell_item)
 
-        chunk_end_row = row_idx
         is_chunk_full = (row_idx - chunk_start_row + 1) >= CHUNK_SIZE
         is_last_row = (row_idx == last_row_idx)
 
         if (is_chunk_full or is_last_row) and len(buffer) > 0:
+            chunk_index = chunk_index_for_row(chunk_start_row)
+            row_start, row_end = chunk_row_bounds(chunk_index)
             chunk = ExcelSheetChunk(
                 document_id=sheet_entity.document_id,
                 sheet_id=sheet_entity.id,
                 chunk_index=chunk_index,
-                row_start=chunk_start_row,
-                row_end=chunk_end_row,
+                row_start=row_start,
+                row_end=row_end,
                 celldata_json=json.dumps(buffer)
             )
             db.add(chunk)
             db.flush()
 
             buffer.clear()
-            chunk_index += 1
+            chunk_count = chunk_index + 1
             chunk_start_row = row_idx + 1
         elif is_chunk_full:
             chunk_start_row = row_idx + 1
 
     # Update sheet chunk count
-    sheet_entity.chunk_count = chunk_index
+    sheet_entity.chunk_count = chunk_count or empty_sheet_chunk_count(last_row_idx + 1)
     db.add(sheet_entity)
     db.flush()
-    logger.info(f"Sheet chunks saved: count={chunk_index}")
+    logger.info(f"Sheet chunks saved: count={sheet_entity.chunk_count}")
 
 
 def parse_and_save(file_path: str, document: ExcelDocument, db: Session) -> List[ExcelSheet]:

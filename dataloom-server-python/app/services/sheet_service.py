@@ -1,10 +1,9 @@
 import json
 import logging
-import math
 from typing import List, Dict, Any, Tuple
 from sqlalchemy.orm import Session
 from app.models import ExcelSheet, ExcelSheetChunk, ExcelDocument
-from app.config import CHUNK_SIZE
+from app.services.chunking import chunk_index_for_row, chunk_row_bounds, empty_sheet_chunk_count
 import app.services.document_service as document_service
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ def batch_update_cells(doc_id: int, updates: List[Dict[str, Any]], db: Session):
     for update in updates:
         sheet_id = int(update["sheetId"])
         r = int(update["r"])
-        chunk_idx = r // CHUNK_SIZE
+        chunk_idx = chunk_index_for_row(r)
         key = f"{sheet_id}_{chunk_idx}"
         if key not in chunk_groups:
             chunk_groups[key] = []
@@ -67,12 +66,13 @@ def batch_update_cells(doc_id: int, updates: List[Dict[str, Any]], db: Session):
             is_new_chunk = False
             if chunk is None:
                 is_new_chunk = True
+                row_start, row_end = chunk_row_bounds(target_chunk_idx)
                 chunk = ExcelSheetChunk(
                     document_id=doc_id,
                     sheet_id=sheet_id,
                     chunk_index=target_chunk_idx,
-                    row_start=target_chunk_idx * CHUNK_SIZE,
-                    row_end=(target_chunk_idx + 1) * CHUNK_SIZE - 1,
+                    row_start=row_start,
+                    row_end=row_end,
                     celldata_json="[]"
                 )
                 cell_array = []
@@ -327,22 +327,22 @@ def save_celldata_chunks(doc_id: int, sheet_id: int, celldata: List[Dict[str, An
     chunks = {}
     for cell in celldata:
         r = int(cell["r"])
-        chunk_idx = r // CHUNK_SIZE
+        chunk_idx = chunk_index_for_row(r)
         if chunk_idx not in chunks:
             chunks[chunk_idx] = []
         chunks[chunk_idx].append(cell)
 
     if not chunks:
-        # Return at least 1 chunk
-        return max(1, math.ceil(max(total_rows, 1) / CHUNK_SIZE))
+        return empty_sheet_chunk_count(total_rows)
 
     for chunk_idx, cells in chunks.items():
+        row_start, row_end = chunk_row_bounds(chunk_idx)
         chunk = ExcelSheetChunk(
             document_id=doc_id,
             sheet_id=sheet_id,
             chunk_index=chunk_idx,
-            row_start=chunk_idx * CHUNK_SIZE,
-            row_end=(chunk_idx + 1) * CHUNK_SIZE - 1,
+            row_start=row_start,
+            row_end=row_end,
             celldata_json=json.dumps(cells)
         )
         db.add(chunk)
